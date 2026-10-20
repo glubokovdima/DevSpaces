@@ -450,6 +450,7 @@ class Card(QWidget):
         self._face_key = None
         self.ctrl = None           # DevSpaces: ему карточка отдаёт перетаскивание окна
         self.drop_target = False
+        self.lifted = False        # эту карточку сейчас переносят на другое место
         self._press = None
         self._dragging = False
 
@@ -478,16 +479,6 @@ class Card(QWidget):
         tr.translate(-self.face_w / 2, -self.face_h / 2)
         return tr
 
-    def thumb_point(self, pos):
-        """Точка карточки → доля ширины и высоты миниатюры (0..1) с учётом перспективы, или None мимо картинки."""
-        inv, ok = self._transform().inverted()
-        if not ok:
-            return None
-        fp = inv.map(pos)
-        x = (fp.x() - FACE_SHADOW) / self.thumb_w
-        y = (fp.y() - FACE_SHADOW) / self.thumb_h
-        return (x, y) if 0 <= x <= 1 and 0 <= y <= 1 else None
-
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
             self._press = e.position()
@@ -497,8 +488,7 @@ class Card(QWidget):
         if self._press is None or not (e.buttons() & Qt.LeftButton):
             return
         if not self._dragging and (e.position() - self._press).manhattanLength() > 6:
-            rel = self.thumb_point(self._press)
-            self._dragging = bool(rel and self.ctrl and self.ctrl.begin_thumb_drag(self, rel))
+            self._dragging = bool(self.ctrl and self.ctrl.begin_card_drag(self))
             if not self._dragging:
                 self._press = None
         if self._dragging:
@@ -589,6 +579,8 @@ class Card(QWidget):
             self._face_key = key
         p = QPainter(self)
         p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
+        if self.lifted:
+            p.setOpacity(0.45)
         p.setTransform(self._transform())
         p.drawPixmap(0, 0, self._face)
         p.end()
@@ -1091,24 +1083,15 @@ class DevSpaces(QObject):
                 c.drop_target = c is card
                 c.update()
 
-    def begin_thumb_drag(self, card, rel):
-        try:
-            views = VirtualDesktop(self._num(card.desk_id)).apps_by_z_order(include_pinned=False)
-        except Exception:
+    def begin_card_drag(self, card):
+        if len(self.desks) < 2:
             return False
-        g = QGuiApplication.primaryScreen().geometry()
-        px, py = rel[0] * g.width() * self.dpr, rel[1] * g.height() * self.dpr
-        for v in views:  # верхнее окно первым — берём то, что видно в этой точке
-            h = v.hwnd
-            if window_pid(h) == self.own_pid or user32.IsIconic(h):
-                continue
-            r = frame_rect(h)
-            if r.left <= px < r.right and r.top <= py < r.bottom:
-                self.drag = {"hwnd": h, "src": card.desk_id, "name": window_app_name(h)[0]}
-                card.setCursor(Qt.ClosedHandCursor)
-                log.info("thumbnail drag: %s from desktop %s", self.drag["name"], self._num(card.desk_id))
-                return True
-        return False
+        self.drag = {"src": card.desk_id}
+        card.lifted = True
+        card.setCursor(Qt.ClosedHandCursor)
+        card.update()
+        log.info("card drag: desktop %s", self._num(card.desk_id))
+        return True
 
     def update_drag(self):
         if not self.drag:
@@ -1116,18 +1099,29 @@ class DevSpaces(QObject):
         c = self.card_at(QCursor.pos())
         target = c if c and c.desk_id != self.drag["src"] else None
         self.set_drop_target(target)
-        text = f'{self.drag["name"]} → {target.name}' if target else self.drag["name"]
-        QToolTip.showText(QCursor.pos() + QPoint(14, 12), text)
+        if target:
+            QToolTip.showText(QCursor.pos() + QPoint(14, 12),
+                              f'«{self._name(self.drag["src"])}» → место {self._num(target.desk_id)}')
+        else:
+            QToolTip.hideText()
 
     def end_drag(self):
         c = self.card_at(QCursor.pos())
         self.set_drop_target(None)
         QToolTip.hideText()
+        d, self.drag = self.drag, None
         for card in self.cards.values():
             card.setCursor(Qt.PointingHandCursor)
-        d, self.drag = self.drag, None
+            if card.lifted:
+                card.lifted = False
+                card.update()
         if d and c and c.desk_id != d["src"]:
-            self.move_window(d["hwnd"], d["src"], c.desk_id)
+            try:
+                # Стол встаёт на место того, над которым отпустили; остальные сдвигаются
+                self.move_desktop(d["src"], self._num(c.desk_id) - 1)
+            except Exception as e:
+                log.warning("reorder failed: %s", e)
+            self.poll_desktops()
 
     def move_window(self, hwnd, src, dst):
         try:

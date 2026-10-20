@@ -62,6 +62,18 @@ def right_click_and_choose(i, label_start):
     u.mouse_event(8, 0, 0, 0, 0); u.mouse_event(16, 0, 0, 0, 0)  # правая кнопка
 
 
+def drag_card(i, j, n=15):
+    """Тянем карточку i на место карточки j настоящей мышью, не блокируя цикл событий Qt."""
+    a, b = card(i), card(j)
+    x1, y1 = phys(a.mapToGlobal(a.rect().center()))
+    x2, y2 = phys(b.mapToGlobal(b.rect().center()))
+    u.SetCursorPos(x1, y1)
+    u.mouse_event(2, 0, 0, 0, 0)
+    for k in range(1, n + 1):
+        QTimer.singleShot(40 * k, lambda k=k: u.SetCursorPos(round(x1 + (x2 - x1) * k / n), round(y1 + (y2 - y1) * k / n)))
+    QTimer.singleShot(40 * n + 300, lambda: u.mouse_event(4, 0, 0, 0, 0))
+
+
 steps = []
 def step(fn, delay=1.5): steps.append((fn, delay))
 
@@ -103,6 +115,12 @@ check("переместить выше: новый стол стал предп�
       and get_virtual_desktops()[n0].name == before[-1][1])
 step(lambda: right_click_and_choose(n0 - 1, "Переместить ниже"), 2.0)
 check("переместить ниже: новый стол снова последний",
+      lambda: [x.name for x in get_virtual_desktops()][:n0] == [nm for _, nm in before])
+step(lambda: drag_card(n0, n0 - 1), 2.0)
+check("перетащить карточку: новый стол встал на место предпоследнего",
+      lambda: [x.name for x in get_virtual_desktops()][n0] == before[-1][1])
+step(lambda: drag_card(n0 - 1, n0), 2.0)
+check("перетащить обратно: новый стол снова последний",
       lambda: [x.name for x in get_virtual_desktops()][:n0] == [nm for _, nm in before])
 step(lambda: shot("menu_5desks.png"), 0.3)
 step(lambda: right_click_and_choose(n0, "Закрыть стол"), 2.0)

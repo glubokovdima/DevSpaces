@@ -1,7 +1,6 @@
 """Живой тест переноса окон между столами через карточки.
 
-1) Тащим окно с миниатюры активного стола на карточку другого стола.
-2) Тащим окно за заголовок и бросаем на карточку другого стола — окно должно вернуться на прежнее место.
+Тащим окно за заголовок и бросаем на карточку другого стола — окно должно вернуться на прежнее место.
 Запускать при работающей DevSpaces; мышь не трогать ~20 с. Тестовое окно в конце закрывается.
 """
 import ctypes, subprocess, sys, time, functools
@@ -89,16 +88,8 @@ others = [d.number for d in get_virtual_desktops() if d.number != cur]
 a, b = others[0], others[1] if len(others) > 1 else others[0]
 ok = True
 
-# 1) с миниатюры: окно в левой части экрана, хватаем его на миниатюре активного стола
 p, hw = spawn(round(W * 0.05), round(H * 0.15), round(W * 0.45), round(H * 0.6))
-u.SetForegroundWindow(hw); time.sleep(1.5)  # дать DevSpaces снять стол с этим окном поверх
-sx, sy = thumb_to_screen(cur - 1, 0.25, 0.45)
-tx, ty = card_center(a - 1)
-drag(sx, sy, tx, ty)
-res = AppView(hw).desktop.number
-print(f"1) с миниатюры стола {cur} на карточку {a}: окно теперь на столе {res} → {'OK' if res == a else 'FAIL'}")
-ok &= res == a
-AppView(hw).move(VirtualDesktop(cur)); time.sleep(0.5)
+time.sleep(1.5)  # окно ещё встаёт на заданное место; схватить заголовок раньше — промахнёмся
 
 # 2) за заголовок: окно тащим к карточке, отпускаем — оно должно уехать и вернуться на место
 u.SetForegroundWindow(hw); time.sleep(0.6)
