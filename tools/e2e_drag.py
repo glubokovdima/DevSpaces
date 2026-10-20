@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from PySide6.QtCore import QPointF
 from PySide6.QtGui import QGuiApplication
 import devspaces as ds
+ds.apply_size(ds.load_settings()["size"])  # раскладка карточек зависит от выбранного размера
 from pyvda import AppView, VirtualDesktop, get_virtual_desktops
 
 app = QGuiApplication([])

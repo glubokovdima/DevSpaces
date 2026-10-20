@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (QApplication, QMenu, QScrollArea, QSystemTrayIcon
                                QWidget)
 
 import mss
+import pyvda.pyvda as pyvda_impl
 from pyvda import AppView, VirtualDesktop, get_virtual_desktops
 
 APP_NAME = "DevSpaces"
@@ -27,14 +28,30 @@ SETTINGS_FILE = DATA_DIR / "settings.json"
 LOG_FILE = DATA_DIR / "devspaces.log"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
-PANEL_W = 124
 MARGIN = 4          # отступ панели от краёв экрана
 PAD = 4             # внутренний отступ панели
-THUMB_W = 84        # ширина миниатюры в логических px
-FACE_SHADOW = 4     # поле под тень вокруг миниатюры
 CARD_TILT = 22      # поворот карточки, градусы: левый край уходит вглубь
-TILT_DIST = 180     # чем меньше, тем сильнее перспектива
 HOVER_SCALE = 1.07
+# Размер плитки — ширина миниатюры в логических px; остальное считает apply_size
+SIZES = {"xs": ("Очень маленький", 56), "s": ("Маленький", 84), "m": ("Средний", 112),
+         "l": ("Большой", 140), "xl": ("Очень большой", 168)}
+
+
+def apply_size(key):
+    """Пересчитать размеры карточки и панели под выбранную ширину миниатюры."""
+    global THUMB_W, PANEL_W, FACE_SHADOW, TILT_DIST, R_THUMB, PT_NAME, PT_APPS, H_NAME, H_APPS
+    THUMB_W = SIZES.get(key, SIZES["s"])[1]
+    PANEL_W = THUMB_W + 40
+    FACE_SHADOW = 3 + THUMB_W // 56          # поле под тень вокруг миниатюры
+    TILT_DIST = round(THUMB_W * 15 / 7)      # перспектива одинаково заметна на любом размере
+    R_THUMB = 3 + THUMB_W / 28               # скругление миниатюры
+    PT_NAME = 6.5 + THUMB_W / 56             # 84 px → 8 pt, 168 px → 9,5 pt
+    PT_APPS = 5.5 + THUMB_W / 84
+    H_NAME = round(PT_NAME * 1.65)
+    H_APPS = round(PT_APPS * 1.7)
+
+
+apply_size("s")
 RADIUS = 12
 GREEN = QColor("#34C759")
 DROP_BLUE = QColor("#4DA3FF")  # карточка, на которую сейчас бросят окно
@@ -89,6 +106,8 @@ def load_settings():
     s.pop("pinned", None)  # старый флаг до появления режимов
     if s.get("mode") not in MODES:
         s["mode"] = "smart"
+    if s.get("size") not in SIZES:
+        s["size"] = "s"
     return s
 
 
@@ -419,7 +438,7 @@ class Card(QWidget):
         self.thumb_w = thumb_w
         self.thumb_h = thumb_h
         self.face_w = thumb_w + 2 * FACE_SHADOW
-        self.face_h = thumb_h + 4 + 13 + 11 + 2 * FACE_SHADOW
+        self.face_h = thumb_h + 4 + H_NAME + H_APPS + 2 * FACE_SHADOW
         self.setFixedSize(PANEL_W - 2 * PAD - 4, round(self.face_h * HOVER_SCALE) + 4)
         self.setCursor(Qt.PointingHandCursor)
         self.t = 0.0  # 0 — покой, 1 — наведение
@@ -485,6 +504,10 @@ class Card(QWidget):
         if self._dragging:
             self.ctrl.update_drag()
 
+    def contextMenuEvent(self, e):
+        if self.ctrl:
+            self.ctrl.card_menu(self, e.globalPos())
+
     def mouseReleaseEvent(self, e):
         if e.button() != Qt.LeftButton:
             return
@@ -509,9 +532,9 @@ class Card(QWidget):
         p.setPen(Qt.NoPen)
         for i in range(S, 0, -1):
             p.setBrush(QColor(0, 0, 0, 14))
-            p.drawRoundedRect(thumb.adjusted(-i, -i + 1, i, i + 1), 6 + i, 6 + i)
+            p.drawRoundedRect(thumb.adjusted(-i, -i + 1, i, i + 1), R_THUMB + i, R_THUMB + i)
         tpath = QPainterPath()
-        tpath.addRoundedRect(thumb, 6, 6)
+        tpath.addRoundedRect(thumb, R_THUMB, R_THUMB)
         p.save()
         p.setClipPath(tpath)
         if self.image is not None:
@@ -520,36 +543,36 @@ class Card(QWidget):
             p.fillRect(thumb, QColor(28, 28, 34))
             p.setPen(QColor(150, 150, 160))
             f = QFont(self.font())
-            f.setPointSizeF(6.5)
+            f.setPointSizeF(PT_APPS)
             p.setFont(f)
             p.drawText(thumb, Qt.AlignCenter, "Нет снимка")
         p.restore()
         p.setBrush(Qt.NoBrush)
         if self.drop_target:
             p.setPen(QPen(DROP_BLUE, 2.5))
-            p.drawRoundedRect(thumb.adjusted(1, 1, -1, -1), 5, 5)
+            p.drawRoundedRect(thumb.adjusted(1, 1, -1, -1), R_THUMB - 1, R_THUMB - 1)
         elif self.active:
             p.setPen(QPen(GREEN, 2))
-            p.drawRoundedRect(thumb.adjusted(1, 1, -1, -1), 5, 5)
+            p.drawRoundedRect(thumb.adjusted(1, 1, -1, -1), R_THUMB - 1, R_THUMB - 1)
         else:
             p.setPen(QPen(QColor(255, 255, 255, 45), 1))
-            p.drawRoundedRect(thumb.adjusted(0.5, 0.5, -0.5, -0.5), 6, 6)
+            p.drawRoundedRect(thumb.adjusted(0.5, 0.5, -0.5, -0.5), R_THUMB, R_THUMB)
 
         # Общей подложки нет: подписи лежат на обоях и иконках, поэтому под текстом узкая тёмная плашка по его ширине
         tx, tw = S + 4, self.thumb_w - 8
         y = int(thumb.bottom()) + 4
         f = QFont(self.font())
-        f.setPointSizeF(8)
+        f.setPointSizeF(PT_NAME)
         f.setWeight(QFont.DemiBold)
         f2 = QFont(self.font())
-        f2.setPointSizeF(6.5)
+        f2.setPointSizeF(PT_APPS)
         apps = " · ".join(self.apps) if self.apps else "Нет окон"
-        lines = [(f, QFontMetrics(f).elidedText(self.name, Qt.ElideRight, tw), QRect(tx, y, tw, 13), QColor(255, 255, 255)),
-                 (f2, QFontMetrics(f2).elidedText(apps, Qt.ElideRight, tw), QRect(tx, y + 13, tw, 11), QColor(215, 215, 222))]
+        lines = [(f, QFontMetrics(f).elidedText(self.name, Qt.ElideRight, tw), QRect(tx, y, tw, H_NAME), QColor(255, 255, 255)),
+                 (f2, QFontMetrics(f2).elidedText(apps, Qt.ElideRight, tw), QRect(tx, y + H_NAME, tw, H_APPS), QColor(215, 215, 222))]
         text_w = max(QFontMetrics(font).horizontalAdvance(text) for font, text, _, _ in lines)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(0, 0, 0, 185))
-        p.drawRoundedRect(QRectF(S, y - 1, text_w + 8, 26), 5, 5)
+        p.drawRoundedRect(QRectF(S, y - 1, text_w + 8, H_NAME + H_APPS + 2), R_THUMB - 1, R_THUMB - 1)
         for font, text, rect, color in lines:
             p.setFont(font)
             p.setPen(QColor(0, 0, 0, 150))
@@ -712,6 +735,7 @@ class DevSpaces(QObject):
         super().__init__()
         self.app = app
         self.settings = load_settings()
+        apply_size(self.settings["size"])
         self.panel = Panel()
         self.handle = Handle()
         self.cards = {}            # desk_id -> Card
@@ -727,6 +751,7 @@ class DevSpaces(QObject):
         self.blocked_raw = False
         self.blocked_since = 0.0
         self.drag = None           # окно, которое тащат с миниатюры
+        self.card_menu_open = False
         self.win_drag = None       # окно, которое тащат за заголовок к карточке
         self.fg_last = None        # (hwnd, rect, развёрнуто) окна с фокусом до начала перетаскивания
         self.own_pid = os.getpid()
@@ -809,6 +834,15 @@ class DevSpaces(QObject):
             group.addAction(a)
             m.addAction(a)
         m.addSeparator()
+        sm = m.addMenu("Размер плиток")
+        sgroup = QActionGroup(sm)
+        sgroup.setExclusive(True)
+        for key, (title, _) in SIZES.items():
+            a = QAction(title, sm, checkable=True, checked=self.settings["size"] == key)
+            a.triggered.connect(lambda _=False, key=key: self.set_size(key))
+            sgroup.addAction(a)
+            sm.addAction(a)
+        m.addSeparator()
         self.act_auto = QAction("Автозапуск", m, checkable=True, checked=autostart_enabled())
         self.act_auto.toggled.connect(self.set_autostart)
         act_quit = QAction("Выход", m)
@@ -825,6 +859,77 @@ class DevSpaces(QObject):
         if reason == QSystemTrayIcon.Trigger:
             self.peek_until = time.monotonic() + 2.5
             self.panel.slide_in()
+
+    def set_size(self, key):
+        self.settings["size"] = key
+        save_settings(self.settings)
+        apply_size(key)
+        log.info("tile size: %s (%d px)", key, THUMB_W)
+        g = QGuiApplication.primaryScreen().geometry()
+        self.thumb_w = THUMB_W
+        self.thumb_h = round(self.thumb_w * g.height() / g.width())
+        # Карточки фиксированного размера проще пересоздать; старые снимки растянутся до новых
+        for c in self.cards.values():
+            c.deleteLater()
+        self.cards.clear()
+        self.desks = []
+        self.poll_desktops()
+        self.poll_apps()
+        self.handle.place()
+        if self.panel.isVisible():
+            self.panel.setGeometry(self.panel.home_geometry())
+        self.capture_now()
+        self.refresh_live([d for d, _, _ in self.desks])
+
+    # --- управление столами (меню карточки) ---
+
+    def card_menu(self, card, gpos):
+        ids = [d for d, _, _ in self.desks]
+        if card.desk_id not in ids:
+            return
+        i = ids.index(card.desk_id)
+        m = QMenu()
+        a_add = m.addAction("Добавить рабочий стол")
+        m.addSeparator()
+        a_up = m.addAction("Переместить выше")
+        a_up.setEnabled(i > 0)
+        a_down = m.addAction("Переместить ниже")
+        a_down.setEnabled(i < len(ids) - 1)
+        m.addSeparator()
+        fb = ids[i - 1] if i > 0 else (ids[1] if len(ids) > 1 else None)
+        a_close = m.addAction(f"Закрыть стол (окна → «{self._name(fb)}»)" if fb else "Закрыть стол")
+        a_close.setEnabled(fb is not None)
+        self.card_menu_open = True
+        try:
+            act = m.exec(gpos)
+        finally:
+            self.card_menu_open = False
+        try:
+            if act is a_add:
+                VirtualDesktop.create()
+                log.info("desktop created")
+            elif act is a_up or act is a_down:
+                self.move_desktop(card.desk_id, i - 1 if act is a_up else i + 1)
+            elif act is a_close:
+                num, fb_num = self._num(card.desk_id), self._num(fb)
+                VirtualDesktop(num).remove(fallback=VirtualDesktop(fb_num))
+                log.info("desktop %s removed, windows -> %s", num, fb_num)
+        except Exception as e:
+            log.warning("desktop action failed: %s", e)
+        self.poll_desktops()
+
+    def move_desktop(self, did, index):
+        # В pyvda нет обёртки для смены порядка; сигнатура MoveDesktop разная в разных сборках Windows
+        vd = VirtualDesktop(self._num(did))._virtual_desktop
+        mi = pyvda_impl.managers.manager_internal
+        try:
+            mi.MoveDesktop(vd, index)
+        except TypeError:
+            mi.MoveDesktop(vd, 0, index)
+        log.info("desktop %s moved to position %d", self._num(did), index + 1)
+
+    def _name(self, did):
+        return next((nm for d, _, nm in self.desks if d == did), "?")
 
     def set_mode(self, mode):
         self.settings["mode"] = mode
@@ -1124,7 +1229,7 @@ class DevSpaces(QObject):
         else:
             keep_shown = mode == "always"
         self.poll_window_drag(pos)
-        if self.win_drag or self.drag:
+        if self.win_drag or self.drag or self.card_menu_open:
             keep_shown = True  # пока несут окно, карточки должны быть на виду
         show_handle = not keep_shown and not p.target_shown
         if show_handle != self.handle.isVisible():
