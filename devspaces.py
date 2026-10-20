@@ -110,6 +110,7 @@ def load_settings():
         s["size"] = "s"
     if not isinstance(s.get("disabled"), list):
         s["disabled"] = []
+    s["bg_cover"] = bool(s.get("bg_cover", False))
     return s
 
 
@@ -225,6 +226,10 @@ def foreground_blocks(panel_rect, own_pid):
         return None
     if user32.IsIconic(h) or not user32.IsWindowVisible(h) or is_cloaked(h):
         return False
+    return covers(h, panel_rect)
+
+
+def covers(h, panel_rect):
     r = wintypes.RECT()
     # Видимые границы без невидимой рамки-тени: иначе окно у края «задевает» панель на 7 px
     if dwmapi.DwmGetWindowAttribute(wintypes.HWND(h), 9, ctypes.byref(r), ctypes.sizeof(r)) != 0:
@@ -233,6 +238,37 @@ def foreground_blocks(panel_rect, own_pid):
     ix = min(r.right, x + w) - max(r.left, x)
     iy = min(r.bottom, y + hh) - max(r.top, y)
     return ix > 16 and iy > 16
+
+
+WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+
+def any_window_blocks(panel_rect, own_pid):
+    """Заходит ли на панель любое обычное окно текущего стола, даже без фокуса."""
+    found = []
+    buf = ctypes.create_unicode_buffer(128)
+    pid = wintypes.DWORD()
+
+    def check(h, _):
+        if not user32.IsWindowVisible(h) or user32.IsIconic(h) or not covers(h, panel_rect):
+            return True
+        ex = user32.GetWindowLongPtrW(h, GWL_EXSTYLE)
+        # Подсказки, оверлеи, панели и всплывающие окна — не те окна, ради которых прячемся
+        if ex & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | 0x20):  # 0x20 — WS_EX_TRANSPARENT
+            return True
+        if user32.GetWindow(h, 4) and not ex & WS_EX_APPWINDOW:  # GW_OWNER
+            return True
+        user32.GetClassNameW(h, buf, 128)
+        if buf.value in DESKTOP_CLASSES or buf.value in SHELL_TRANSIENT:
+            return True
+        user32.GetWindowThreadProcessId(h, ctypes.byref(pid))
+        if pid.value == own_pid or is_cloaked(h):  # cloaked — окна других столов
+            return True
+        found.append(h)
+        return False
+
+    user32.EnumWindows(WNDENUMPROC(check), 0)
+    return bool(found)
 
 
 class GUITHREADINFO(ctypes.Structure):
@@ -839,6 +875,10 @@ class DevSpaces(QObject):
             a.triggered.connect(lambda _=False, mode=mode: self.set_mode(mode))
             group.addAction(a)
             m.addAction(a)
+        self.act_bg = QAction("Учитывать окна на фоне", m, checkable=True, checked=self.settings["bg_cover"])
+        self.act_bg.setEnabled(self.settings["mode"] == "smart")
+        self.act_bg.toggled.connect(self.set_bg_cover)
+        m.addAction(self.act_bg)
         m.addSeparator()
         sm = m.addMenu("Размер плиток")
         sgroup = QActionGroup(sm)
@@ -952,8 +992,15 @@ class DevSpaces(QObject):
         self.settings["mode"] = mode
         save_settings(self.settings)
         log.info("mode: %s", mode)
+        self.act_bg.setEnabled(mode == "smart")
         self.outside_since = None
         self.blocked_since = 0.0  # пусть умный режим сразу пересчитает перекрытие
+
+    def set_bg_cover(self, on):
+        self.settings["bg_cover"] = on
+        save_settings(self.settings)
+        log.info("background windows count: %s", on)
+        self.blocked_since = 0.0
 
     def set_autostart(self, on):
         try:
@@ -1241,14 +1288,17 @@ class DevSpaces(QObject):
         p = self.panel
         mode = self.settings["mode"]
         if mode == "smart":
-            b = foreground_blocks(self.panel_rect_phys(), self.own_pid)
+            pr = self.panel_rect_phys()
+            b = foreground_blocks(pr, self.own_pid)
+            if b is False and self.settings["bg_cover"]:
+                b = any_window_blocks(pr, self.own_pid)
             if b is not None and b != self.blocked_raw:
                 self.blocked_raw = b
                 self.blocked_since = now
             # Небольшая задержка, чтобы панель не дёргалась, пока окно тащат мимо неё
             if self.blocked != self.blocked_raw and now - self.blocked_since >= 0.2:
                 self.blocked = self.blocked_raw
-                log.info("foreground window %s panel", "covers" if self.blocked else "clear of")
+                log.info("window %s panel", "covers" if self.blocked else "clear of")
             keep_shown = not self.blocked
         else:
             keep_shown = mode == "always"
