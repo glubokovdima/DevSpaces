@@ -109,6 +109,22 @@ step(lambda: d.set_size(orig_size), 2.0)
 n0 = len(before)
 step(lambda: right_click_and_choose(n0 - 1, "Добавить"), 2.0)
 check("добавить стол: стало на 1 больше", lambda: len(d.desks) == n0 + 1)
+def left_click(i):
+    c = card(i)
+    x, y = phys(c.mapToGlobal(c.rect().center()))
+    u.SetCursorPos(x, y); time.sleep(0.1)
+    u.mouse_event(2, 0, 0, 0, 0); u.mouse_event(4, 0, 0, 0, 0)
+
+
+cur0 = []
+step(lambda: right_click_and_choose(n0, "Сделать неактивным"), 1.5)
+check("неактивный: карточка выключена и запомнена",
+      lambda: card(n0).disabled and d.desks[n0][0] in ds.load_settings()["disabled"])
+step(lambda: (cur0.append(d.cur_id), left_click(n0)), 1.5)
+check("неактивный: клик не переключает стол", lambda: d.cur_id == cur0[0])
+step(lambda: shot("disabled.png"), 0.3)
+step(lambda: right_click_and_choose(n0, "Сделать активным"), 1.5)
+check("снова активный", lambda: not card(n0).disabled and d.desks[n0][0] not in ds.load_settings()["disabled"])
 step(lambda: right_click_and_choose(n0, "Переместить выше"), 2.0)
 check("переместить выше: новый стол стал предпоследним",
       lambda: [x.name for x in get_virtual_desktops()][:n0 - 1] == [nm for _, nm in before][:n0 - 1]

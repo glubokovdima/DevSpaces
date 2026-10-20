@@ -108,6 +108,8 @@ def load_settings():
         s["mode"] = "smart"
     if s.get("size") not in SIZES:
         s["size"] = "s"
+    if not isinstance(s.get("disabled"), list):
+        s["disabled"] = []
     return s
 
 
@@ -451,6 +453,7 @@ class Card(QWidget):
         self.ctrl = None           # DevSpaces: ему карточка отдаёт перетаскивание окна
         self.drop_target = False
         self.lifted = False        # эту карточку сейчас переносят на другое место
+        self.disabled = False      # стол выключен: карточка серая, по клику не переходим
         self._press = None
         self._dragging = False
 
@@ -464,8 +467,19 @@ class Card(QWidget):
         self.anim.setEndValue(1.0 if on else 0.0)
         self.anim.start()
 
+    def set_disabled(self, on):
+        self.disabled = on
+        self.reset_cursor()
+        if on:
+            self._hover(False)
+        self.update()
+
+    def reset_cursor(self):
+        self.setCursor(Qt.ArrowCursor if self.disabled else Qt.PointingHandCursor)
+
     def enterEvent(self, e):
-        self._hover(True)
+        if not self.disabled:
+            self._hover(True)
 
     def leaveEvent(self, e):
         self._hover(False)
@@ -507,7 +521,7 @@ class Card(QWidget):
             self.ctrl.end_drag()
             return
         self._press = None
-        if self.rect().contains(e.position().toPoint()):
+        if not self.disabled and self.rect().contains(e.position().toPoint()):
             self.clicked.emit(self.desk_id)
 
     def _render_face(self, dpr):
@@ -528,7 +542,7 @@ class Card(QWidget):
         p.save()
         p.setClipPath(tpath)
         if self.image is not None:
-            p.drawImage(thumb, self.image)
+            p.drawImage(thumb, self.image.convertToFormat(QImage.Format_Grayscale8) if self.disabled else self.image)
         else:
             p.fillRect(thumb, QColor(28, 28, 34))
             p.setPen(QColor(150, 150, 160))
@@ -556,7 +570,7 @@ class Card(QWidget):
         f.setWeight(QFont.DemiBold)
         f2 = QFont(self.font())
         f2.setPointSizeF(PT_APPS)
-        apps = " · ".join(self.apps) if self.apps else "Нет окон"
+        apps = "Неактивен" if self.disabled else " · ".join(self.apps) if self.apps else "Нет окон"
         lines = [(f, QFontMetrics(f).elidedText(self.name, Qt.ElideRight, tw), QRect(tx, y, tw, H_NAME), QColor(255, 255, 255)),
                  (f2, QFontMetrics(f2).elidedText(apps, Qt.ElideRight, tw), QRect(tx, y + H_NAME, tw, H_APPS), QColor(215, 215, 222))]
         text_w = max(QFontMetrics(font).horizontalAdvance(text) for font, text, _, _ in lines)
@@ -573,14 +587,14 @@ class Card(QWidget):
         return pm
 
     def paintEvent(self, e):
-        key = (self.name, tuple(self.apps), id(self.image), self.active, self.drop_target, self.devicePixelRatioF())
+        key = (self.name, tuple(self.apps), id(self.image), self.active, self.drop_target, self.disabled,
+               self.devicePixelRatioF())
         if key != self._face_key:
             self._face = self._render_face(self.devicePixelRatioF())
             self._face_key = key
         p = QPainter(self)
         p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
-        if self.lifted:
-            p.setOpacity(0.45)
+        p.setOpacity((0.45 if self.lifted else 1.0) * (0.4 if self.disabled else 1.0))
         p.setTransform(self._transform())
         p.drawPixmap(0, 0, self._face)
         p.end()
@@ -888,6 +902,8 @@ class DevSpaces(QObject):
         a_down = m.addAction("Переместить ниже")
         a_down.setEnabled(i < len(ids) - 1)
         m.addSeparator()
+        a_toggle = m.addAction("Сделать активным" if card.disabled else "Сделать неактивным")
+        m.addSeparator()
         fb = ids[i - 1] if i > 0 else (ids[1] if len(ids) > 1 else None)
         a_close = m.addAction(f"Закрыть стол (окна → «{self._name(fb)}»)" if fb else "Закрыть стол")
         a_close.setEnabled(fb is not None)
@@ -900,6 +916,8 @@ class DevSpaces(QObject):
             if act is a_add:
                 VirtualDesktop.create()
                 log.info("desktop created")
+            elif act is a_toggle:
+                self.set_disabled(card, not card.disabled)
             elif act is a_up or act is a_down:
                 self.move_desktop(card.desk_id, i - 1 if act is a_up else i + 1)
             elif act is a_close:
@@ -909,6 +927,13 @@ class DevSpaces(QObject):
         except Exception as e:
             log.warning("desktop action failed: %s", e)
         self.poll_desktops()
+
+    def set_disabled(self, card, on):
+        dis = [d for d in self.settings["disabled"] if d != card.desk_id]
+        self.settings["disabled"] = dis + [card.desk_id] if on else dis
+        save_settings(self.settings)
+        card.set_disabled(on)
+        log.info("desktop %s %s", self._num(card.desk_id), "disabled" if on else "enabled")
 
     def move_desktop(self, did, index):
         # В pyvda нет обёртки для смены порядка; сигнатура MoveDesktop разная в разных сборках Windows
@@ -951,6 +976,10 @@ class DevSpaces(QObject):
             return
         self.desks = desks
         ids = [d[0] for d in desks]
+        dis = [d for d in self.settings["disabled"] if d in ids]
+        if dis != self.settings["disabled"]:  # закрытые столы больше не помним
+            self.settings["disabled"] = dis
+            save_settings(self.settings)
         for did in list(self.cards):
             if did not in ids:
                 self.cards.pop(did).deleteLater()
@@ -962,6 +991,7 @@ class DevSpaces(QObject):
                 card.clicked.connect(self.switch_to)
                 card.ctrl = self
                 card.image = self.thumbs.get(did)
+                card.set_disabled(did in dis)
                 self.cards[did] = card
             self.panel.list.removeWidget(card)
             self.panel.list.insertWidget(i, card)
@@ -1000,7 +1030,7 @@ class DevSpaces(QObject):
 
     def switch_to(self, did):
         num = self._num(did)
-        if did == self.cur_id or num == "?":
+        if did == self.cur_id or num == "?" or did in self.settings["disabled"]:
             return
         if self.cur_id and time.monotonic() - self.last_switch >= SWITCH_SETTLE:
             try:
@@ -1111,7 +1141,7 @@ class DevSpaces(QObject):
         QToolTip.hideText()
         d, self.drag = self.drag, None
         for card in self.cards.values():
-            card.setCursor(Qt.PointingHandCursor)
+            card.reset_cursor()
             if card.lifted:
                 card.lifted = False
                 card.update()
