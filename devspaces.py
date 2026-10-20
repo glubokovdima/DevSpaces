@@ -15,7 +15,8 @@ from PySide6.QtCore import (QEasingCurve, QLockFile, QObject, QParallelAnimation
                             QPropertyAnimation, QRect, QRectF, Qt, QTimer, QVariantAnimation, Signal)
 from PySide6.QtGui import (QAction, QActionGroup, QRegion, QColor, QCursor, QFont, QFontMetrics, QGuiApplication, QIcon,
                            QImage, QPainter, QPainterPath, QPen, QPixmap, QTransform)
-from PySide6.QtWidgets import QApplication, QMenu, QScrollArea, QSystemTrayIcon, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (QApplication, QMenu, QScrollArea, QSystemTrayIcon, QToolTip, QVBoxLayout,
+                               QWidget)
 
 import mss
 from pyvda import AppView, VirtualDesktop, get_virtual_desktops
@@ -36,6 +37,7 @@ TILT_DIST = 180     # чем меньше, тем сильнее перспек�
 HOVER_SCALE = 1.07
 RADIUS = 12
 GREEN = QColor("#34C759")
+DROP_BLUE = QColor("#4DA3FF")  # карточка, на которую сейчас бросят окно
 
 EDGE_DWELL = 0.2    # сколько держать курсор у края, чтобы не срабатывать при работе со скроллбаром VS Code
 LEAVE_DELAY = 0.35
@@ -210,6 +212,38 @@ def foreground_blocks(panel_rect, own_pid):
     ix = min(r.right, x + w) - max(r.left, x)
     iy = min(r.bottom, y + hh) - max(r.top, y)
     return ix > 16 and iy > 16
+
+
+class GUITHREADINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD), ("hwndActive", wintypes.HWND),
+                ("hwndFocus", wintypes.HWND), ("hwndCapture", wintypes.HWND), ("hwndMenuOwner", wintypes.HWND),
+                ("hwndMoveSize", wintypes.HWND), ("hwndCaret", wintypes.HWND), ("rcCaret", wintypes.RECT)]
+
+
+def moving_window():
+    """Окно, которое пользователь сейчас тащит или тянет за край (системный цикл перемещения), иначе None."""
+    h = user32.GetForegroundWindow()
+    if not h:
+        return None
+    gti = GUITHREADINFO(cbSize=ctypes.sizeof(GUITHREADINFO))
+    if not user32.GetGUIThreadInfo(user32.GetWindowThreadProcessId(h, None), ctypes.byref(gti)):
+        return None
+    if gti.flags & 0x2 and gti.hwndMoveSize:  # GUI_INMOVESIZE
+        return user32.GetAncestor(gti.hwndMoveSize, 2)  # GA_ROOT
+    return None
+
+
+def frame_rect(h):
+    r = wintypes.RECT()
+    if dwmapi.DwmGetWindowAttribute(wintypes.HWND(h), 9, ctypes.byref(r), ctypes.sizeof(r)) != 0:
+        user32.GetWindowRect(h, ctypes.byref(r))
+    return r
+
+
+def window_pid(h):
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(h, ctypes.byref(pid))
+    return pid.value
 
 
 def left_button_down():
@@ -395,6 +429,10 @@ class Card(QWidget):
         self.anim.valueChanged.connect(self._on_anim)
         self._face = None
         self._face_key = None
+        self.ctrl = None           # DevSpaces: ему карточка отдаёт перетаскивание окна
+        self.drop_target = False
+        self._press = None
+        self._dragging = False
 
     def _on_anim(self, v):
         self.t = v
@@ -412,8 +450,51 @@ class Card(QWidget):
     def leaveEvent(self, e):
         self._hover(False)
 
+    def _transform(self):
+        tr = QTransform()
+        tr.translate(self.width() / 2, self.height() / 2)
+        tr.rotate(CARD_TILT * (1 - 0.5 * self.t), Qt.YAxis, TILT_DIST)
+        sc = 1 + (HOVER_SCALE - 1) * self.t
+        tr.scale(sc, sc)
+        tr.translate(-self.face_w / 2, -self.face_h / 2)
+        return tr
+
+    def thumb_point(self, pos):
+        """Точка карточки → доля ширины и высоты миниатюры (0..1) с учётом перспективы, или None мимо картинки."""
+        inv, ok = self._transform().inverted()
+        if not ok:
+            return None
+        fp = inv.map(pos)
+        x = (fp.x() - FACE_SHADOW) / self.thumb_w
+        y = (fp.y() - FACE_SHADOW) / self.thumb_h
+        return (x, y) if 0 <= x <= 1 and 0 <= y <= 1 else None
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._press = e.position()
+            self._dragging = False
+
+    def mouseMoveEvent(self, e):
+        if self._press is None or not (e.buttons() & Qt.LeftButton):
+            return
+        if not self._dragging and (e.position() - self._press).manhattanLength() > 6:
+            rel = self.thumb_point(self._press)
+            self._dragging = bool(rel and self.ctrl and self.ctrl.begin_thumb_drag(self, rel))
+            if not self._dragging:
+                self._press = None
+        if self._dragging:
+            self.ctrl.update_drag()
+
     def mouseReleaseEvent(self, e):
-        if e.button() == Qt.LeftButton and self.rect().contains(e.position().toPoint()):
+        if e.button() != Qt.LeftButton:
+            return
+        if self._dragging:
+            self._dragging = False
+            self._press = None
+            self.ctrl.end_drag()
+            return
+        self._press = None
+        if self.rect().contains(e.position().toPoint()):
             self.clicked.emit(self.desk_id)
 
     def _render_face(self, dpr):
@@ -444,7 +525,10 @@ class Card(QWidget):
             p.drawText(thumb, Qt.AlignCenter, "Нет снимка")
         p.restore()
         p.setBrush(Qt.NoBrush)
-        if self.active:
+        if self.drop_target:
+            p.setPen(QPen(DROP_BLUE, 2.5))
+            p.drawRoundedRect(thumb.adjusted(1, 1, -1, -1), 5, 5)
+        elif self.active:
             p.setPen(QPen(GREEN, 2))
             p.drawRoundedRect(thumb.adjusted(1, 1, -1, -1), 5, 5)
         else:
@@ -476,19 +560,13 @@ class Card(QWidget):
         return pm
 
     def paintEvent(self, e):
-        key = (self.name, tuple(self.apps), id(self.image), self.active, self.devicePixelRatioF())
+        key = (self.name, tuple(self.apps), id(self.image), self.active, self.drop_target, self.devicePixelRatioF())
         if key != self._face_key:
             self._face = self._render_face(self.devicePixelRatioF())
             self._face_key = key
         p = QPainter(self)
         p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
-        tr = QTransform()
-        tr.translate(self.width() / 2, self.height() / 2)
-        tr.rotate(CARD_TILT * (1 - 0.5 * self.t), Qt.YAxis, TILT_DIST)
-        sc = 1 + (HOVER_SCALE - 1) * self.t
-        tr.scale(sc, sc)
-        tr.translate(-self.face_w / 2, -self.face_h / 2)
-        p.setTransform(tr)
+        p.setTransform(self._transform())
         p.drawPixmap(0, 0, self._face)
         p.end()
 
@@ -648,6 +726,9 @@ class DevSpaces(QObject):
         self.blocked = False       # умный режим: активное окно заходит на панель
         self.blocked_raw = False
         self.blocked_since = 0.0
+        self.drag = None           # окно, которое тащат с миниатюры
+        self.win_drag = None       # окно, которое тащат за заголовок к карточке
+        self.fg_last = None        # (hwnd, rect, развёрнуто) окна с фокусом до начала перетаскивания
         self.own_pid = os.getpid()
 
         scr = QGuiApplication.primaryScreen()
@@ -782,6 +863,7 @@ class DevSpaces(QObject):
             if card is None:
                 card = Card(did, self.thumb_w, self.thumb_h)
                 card.clicked.connect(self.switch_to)
+                card.ctrl = self
                 card.image = self.thumbs.get(did)
                 self.cards[did] = card
             self.panel.list.removeWidget(card)
@@ -869,9 +951,13 @@ class DevSpaces(QObject):
         p = self.panel
         if not (p.target_shown and p.isVisible()) or self.live.busy or time.monotonic() - self.last_live < LIVE_EVERY:
             return
+        if self.refresh_live([d for d, _, _ in self.desks]):
+            self.last_live = time.monotonic()
+
+    def refresh_live(self, dids):
         jobs = []
         for did, num, _ in self.desks:
-            if did == self.cur_id:
+            if did == self.cur_id or did not in dids:
                 continue
             try:
                 views = VirtualDesktop(num).apps_by_z_order(include_pinned=False)
@@ -879,13 +965,114 @@ class DevSpaces(QObject):
                 continue
             jobs.append((did, [v.hwnd for v in views]))
         if not jobs:
-            return
-        self.last_live = time.monotonic()
+            return False
         a = QGuiApplication.primaryScreen().availableGeometry()
         k = self.dpr
         self.live.submit(jobs, round(self.thumb_w * self.dpr),
                          (round(a.x() * k), round(a.y() * k), round(a.width() * k), round(a.height() * k)))
         log.info("live thumbnails requested for %d desktops", len(jobs))
+        return True
+
+    # --- перенос окон между столами ---
+
+    def card_at(self, gpos):
+        if not self.panel.isVisible():
+            return None
+        return next((c for c in self.cards.values() if c.rect().contains(c.mapFromGlobal(gpos))), None)
+
+    def set_drop_target(self, card):
+        for c in self.cards.values():
+            if c.drop_target != (c is card):
+                c.drop_target = c is card
+                c.update()
+
+    def begin_thumb_drag(self, card, rel):
+        try:
+            views = VirtualDesktop(self._num(card.desk_id)).apps_by_z_order(include_pinned=False)
+        except Exception:
+            return False
+        g = QGuiApplication.primaryScreen().geometry()
+        px, py = rel[0] * g.width() * self.dpr, rel[1] * g.height() * self.dpr
+        for v in views:  # верхнее окно первым — берём то, что видно в этой точке
+            h = v.hwnd
+            if window_pid(h) == self.own_pid or user32.IsIconic(h):
+                continue
+            r = frame_rect(h)
+            if r.left <= px < r.right and r.top <= py < r.bottom:
+                self.drag = {"hwnd": h, "src": card.desk_id, "name": window_app_name(h)[0]}
+                card.setCursor(Qt.ClosedHandCursor)
+                log.info("thumbnail drag: %s from desktop %s", self.drag["name"], self._num(card.desk_id))
+                return True
+        return False
+
+    def update_drag(self):
+        if not self.drag:
+            return
+        c = self.card_at(QCursor.pos())
+        target = c if c and c.desk_id != self.drag["src"] else None
+        self.set_drop_target(target)
+        text = f'{self.drag["name"]} → {target.name}' if target else self.drag["name"]
+        QToolTip.showText(QCursor.pos() + QPoint(14, 12), text)
+
+    def end_drag(self):
+        c = self.card_at(QCursor.pos())
+        self.set_drop_target(None)
+        QToolTip.hideText()
+        for card in self.cards.values():
+            card.setCursor(Qt.PointingHandCursor)
+        d, self.drag = self.drag, None
+        if d and c and c.desk_id != d["src"]:
+            self.move_window(d["hwnd"], d["src"], c.desk_id)
+
+    def move_window(self, hwnd, src, dst):
+        try:
+            AppView(hwnd).move(VirtualDesktop(self._num(dst)))
+        except Exception as e:
+            log.warning("move window failed: %s", e)
+            return
+        log.info("moved %s: desktop %s -> %s", window_app_name(hwnd)[0], self._num(src), self._num(dst))
+        self.poll_apps()
+        # Снимки обоих столов устарели: окно ушло с одного и появилось на другом
+        QTimer.singleShot(400, lambda: (self.capture_now(), self.refresh_live([src, dst])))
+
+    def poll_window_drag(self, pos):
+        """Окно тащат за заголовок: показываем панель и, если отпустили над чужой карточкой, переносим окно."""
+        h = moving_window()
+        if h and window_pid(h) == self.own_pid:
+            h = None
+        if h:
+            if self.win_drag is None:
+                prev = self.fg_last if self.fg_last and self.fg_last[0] == h else None
+                r = wintypes.RECT()
+                user32.GetWindowRect(h, ctypes.byref(r))
+                self.win_drag = {"hwnd": h, "rect": prev[1] if prev else (r.left, r.top, r.right, r.bottom),
+                                 "zoomed": prev[2] if prev else False}
+            c = self.card_at(pos)
+            self.set_drop_target(c if c and c.desk_id != self.cur_id else None)
+            return
+        if self.win_drag:
+            d, self.win_drag = self.win_drag, None
+            c = self.card_at(pos)
+            self.set_drop_target(None)
+            if c and c.desk_id != self.cur_id:
+                hw = d["hwnd"]
+                l, t, r_, b = d["rect"]
+                cur = wintypes.RECT()
+                user32.GetWindowRect(hw, ctypes.byref(cur))
+                # Тянули за край (изменение размера), а не за заголовок — не переносим
+                if not d["zoomed"] and (cur.right - cur.left, cur.bottom - cur.top) != (r_ - l, b - t):
+                    return
+                # Окно бросили у правого края — возвращаем ему прежнее место и размер на новом столе
+                user32.SetWindowPos(hw, 0, l, t, r_ - l, b - t, 0x0004 | 0x0010)  # NOZORDER | NOACTIVATE
+                if d["zoomed"]:
+                    user32.ShowWindow(hw, 3)  # SW_MAXIMIZE
+                self.move_window(hw, self.cur_id, c.desk_id)
+            return
+        fg = user32.GetForegroundWindow()
+        if fg:
+            r = wintypes.RECT()
+            user32.GetWindowRect(fg, ctypes.byref(r))
+            self.fg_last = (fg, (r.left, r.top, r.right, r.bottom), bool(user32.IsZoomed(fg)))
 
     def on_live(self, did, img):
         if did == self.cur_id:  # пока собирали, пользователь перешёл на этот стол — настоящий снимок точнее
@@ -936,6 +1123,9 @@ class DevSpaces(QObject):
             keep_shown = not self.blocked
         else:
             keep_shown = mode == "always"
+        self.poll_window_drag(pos)
+        if self.win_drag or self.drag:
+            keep_shown = True  # пока несут окно, карточки должны быть на виду
         show_handle = not keep_shown and not p.target_shown
         if show_handle != self.handle.isVisible():
             if show_handle:
