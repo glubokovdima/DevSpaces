@@ -26,13 +26,13 @@ SETTINGS_FILE = DATA_DIR / "settings.json"
 LOG_FILE = DATA_DIR / "devspaces.log"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
-PANEL_W = 212
+PANEL_W = 124
 MARGIN = 4          # отступ панели от краёв экрана
 PAD = 4             # внутренний отступ панели
-THUMB_W = 168       # ширина миниатюры в логических px
-FACE_SHADOW = 6     # поле под тень вокруг миниатюры
+THUMB_W = 84        # ширина миниатюры в логических px
+FACE_SHADOW = 4     # поле под тень вокруг миниатюры
 CARD_TILT = 22      # поворот карточки, градусы: левый край уходит вглубь
-TILT_DIST = 360     # чем меньше, тем сильнее перспектива
+TILT_DIST = 180     # чем меньше, тем сильнее перспектива
 HOVER_SCALE = 1.07
 RADIUS = 12
 GREEN = QColor("#34C759")
@@ -385,7 +385,7 @@ class Card(QWidget):
         self.thumb_w = thumb_w
         self.thumb_h = thumb_h
         self.face_w = thumb_w + 2 * FACE_SHADOW
-        self.face_h = thumb_h + 6 + 16 + 14 + 2 * FACE_SHADOW
+        self.face_h = thumb_h + 4 + 13 + 11 + 2 * FACE_SHADOW
         self.setFixedSize(PANEL_W - 2 * PAD - 4, round(self.face_h * HOVER_SCALE) + 4)
         self.setCursor(Qt.PointingHandCursor)
         self.t = 0.0  # 0 — покой, 1 — наведение
@@ -428,9 +428,9 @@ class Card(QWidget):
         p.setPen(Qt.NoPen)
         for i in range(S, 0, -1):
             p.setBrush(QColor(0, 0, 0, 14))
-            p.drawRoundedRect(thumb.adjusted(-i, -i + 2, i, i + 2), 9 + i, 9 + i)
+            p.drawRoundedRect(thumb.adjusted(-i, -i + 1, i, i + 1), 6 + i, 6 + i)
         tpath = QPainterPath()
-        tpath.addRoundedRect(thumb, 9, 9)
+        tpath.addRoundedRect(thumb, 6, 6)
         p.save()
         p.setClipPath(tpath)
         if self.image is not None:
@@ -439,33 +439,33 @@ class Card(QWidget):
             p.fillRect(thumb, QColor(28, 28, 34))
             p.setPen(QColor(150, 150, 160))
             f = QFont(self.font())
-            f.setPointSizeF(8)
+            f.setPointSizeF(6.5)
             p.setFont(f)
             p.drawText(thumb, Qt.AlignCenter, "Нет снимка")
         p.restore()
         p.setBrush(Qt.NoBrush)
         if self.active:
-            p.setPen(QPen(GREEN, 2.5))
-            p.drawRoundedRect(thumb.adjusted(1, 1, -1, -1), 8, 8)
+            p.setPen(QPen(GREEN, 2))
+            p.drawRoundedRect(thumb.adjusted(1, 1, -1, -1), 5, 5)
         else:
             p.setPen(QPen(QColor(255, 255, 255, 45), 1))
-            p.drawRoundedRect(thumb.adjusted(0.5, 0.5, -0.5, -0.5), 9, 9)
+            p.drawRoundedRect(thumb.adjusted(0.5, 0.5, -0.5, -0.5), 6, 6)
 
         # Общей подложки нет: подписи лежат на обоях и иконках, поэтому под текстом узкая тёмная плашка по его ширине
-        tx, tw = S + 6, self.thumb_w - 12
-        y = int(thumb.bottom()) + 6
+        tx, tw = S + 4, self.thumb_w - 8
+        y = int(thumb.bottom()) + 4
         f = QFont(self.font())
-        f.setPointSizeF(9.5)
+        f.setPointSizeF(8)
         f.setWeight(QFont.DemiBold)
         f2 = QFont(self.font())
-        f2.setPointSizeF(8)
+        f2.setPointSizeF(6.5)
         apps = " · ".join(self.apps) if self.apps else "Нет окон"
-        lines = [(f, QFontMetrics(f).elidedText(self.name, Qt.ElideRight, tw), QRect(tx, y, tw, 16), QColor(255, 255, 255)),
-                 (f2, QFontMetrics(f2).elidedText(apps, Qt.ElideRight, tw), QRect(tx, y + 16, tw, 14), QColor(215, 215, 222))]
+        lines = [(f, QFontMetrics(f).elidedText(self.name, Qt.ElideRight, tw), QRect(tx, y, tw, 13), QColor(255, 255, 255)),
+                 (f2, QFontMetrics(f2).elidedText(apps, Qt.ElideRight, tw), QRect(tx, y + 13, tw, 11), QColor(215, 215, 222))]
         text_w = max(QFontMetrics(font).horizontalAdvance(text) for font, text, _, _ in lines)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(0, 0, 0, 185))
-        p.drawRoundedRect(QRectF(S, y - 2, text_w + 12, 34), 7, 7)
+        p.drawRoundedRect(QRectF(S, y - 1, text_w + 8, 26), 5, 5)
         for font, text, rect, color in lines:
             p.setFont(font)
             p.setPen(QColor(0, 0, 0, 150))
