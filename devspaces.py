@@ -15,7 +15,7 @@ from PySide6.QtCore import (QEasingCurve, QLockFile, QObject, QParallelAnimation
                             QPropertyAnimation, QRect, QRectF, Qt, QTimer, QVariantAnimation, Signal)
 from PySide6.QtGui import (QAction, QActionGroup, QRegion, QColor, QCursor, QFont, QFontMetrics, QGuiApplication, QIcon,
                            QImage, QPainter, QPainterPath, QPen, QPixmap, QTransform)
-from PySide6.QtWidgets import (QApplication, QMenu, QScrollArea, QSystemTrayIcon, QToolTip, QVBoxLayout,
+from PySide6.QtWidgets import (QApplication, QInputDialog, QMenu, QScrollArea, QSystemTrayIcon, QToolTip, QVBoxLayout,
                                QWidget)
 
 import mss
@@ -176,6 +176,23 @@ def is_cloaked(hwnd):
     v = ctypes.c_int(0)
     dwmapi.DwmGetWindowAttribute(wintypes.HWND(hwnd), DWMWA_CLOAKED, ctypes.byref(v), 4)
     return v.value != 0
+
+
+def force_foreground(hwnd):
+    """Окно на передний план и в фокус. Фоновому процессу Windows фокус не отдаёт,
+    поэтому на время подключаемся к очереди ввода окна, у которого фокус сейчас."""
+    fg = user32.GetForegroundWindow()
+    me = kernel32.GetCurrentThreadId()
+    other = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+    attach = other and other != me
+    if attach:
+        user32.AttachThreadInput(me, other, True)
+    try:
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+    finally:
+        if attach:
+            user32.AttachThreadInput(me, other, False)
 
 
 def apply_panel_styles(hwnd):
@@ -936,6 +953,7 @@ class DevSpaces(QObject):
         i = ids.index(card.desk_id)
         m = QMenu()
         a_add = m.addAction("Добавить рабочий стол")
+        a_rename = m.addAction("Переименовать…")
         m.addSeparator()
         a_up = m.addAction("Переместить выше")
         a_up.setEnabled(i > 0)
@@ -956,6 +974,8 @@ class DevSpaces(QObject):
             if act is a_add:
                 VirtualDesktop.create()
                 log.info("desktop created")
+            elif act is a_rename:
+                self.rename_desktop(card)
             elif act is a_toggle:
                 self.set_disabled(card, not card.disabled)
             elif act is a_up or act is a_down:
@@ -967,6 +987,26 @@ class DevSpaces(QObject):
         except Exception as e:
             log.warning("desktop action failed: %s", e)
         self.poll_desktops()
+
+    def rename_desktop(self, card):
+        dlg = QInputDialog()
+        dlg.setWindowTitle("Переименовать стол")
+        dlg.setLabelText("Название стола:")
+        dlg.setTextValue(card.name)
+        dlg.setWindowFlag(Qt.WindowStaysOnTopHint)
+        self.card_menu_open = True  # пока вводят имя, панель не прячется
+        try:
+            dlg.show()
+            force_foreground(int(dlg.winId()))  # чтобы сразу печатать, без клика по окну
+            dlg.activateWindow()
+            ok = dlg.exec()
+        finally:
+            self.card_menu_open = False
+        name = dlg.textValue().strip()
+        if ok and name != card.name:
+            # Пустое имя — Windows сама покажет «Рабочий стол N»
+            VirtualDesktop(self._num(card.desk_id)).rename(name)
+            log.info("desktop %s renamed", self._num(card.desk_id))
 
     def set_disabled(self, card, on):
         dis = [d for d in self.settings["disabled"] if d != card.desk_id]
