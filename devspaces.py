@@ -1247,6 +1247,10 @@ class DevSpaces(QObject):
             log.warning("move window failed: %s", e)
             return
         log.info("moved %s: desktop %s -> %s", window_app_name(hwnd)[0], self._num(src), self._num(dst))
+        # Пользователь идёт вслед за окном; на неактивный стол switch_to не переходит — окно просто уезжает
+        self.switch_to(dst)
+        if self.cur_id == dst:
+            QTimer.singleShot(300, lambda: force_foreground(hwnd))
         self.poll_apps()
         # Снимки обоих столов устарели: окно ушло с одного и появилось на другом
         QTimer.singleShot(400, lambda: (self.capture_now(), self.refresh_live([src, dst])))
